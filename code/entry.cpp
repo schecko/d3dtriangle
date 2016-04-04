@@ -8,6 +8,20 @@
 
 #define DEBUGGING true
 
+enum ShaderType
+{
+    pixelShader,
+    vertexShader
+
+};
+
+struct Vertex
+{
+    float x, y, z;
+    float r, g, b, a;
+
+};
+
 struct MainMemory
 {
     HINSTANCE exeHandle;
@@ -21,8 +35,13 @@ struct MainMemory
     ID3D11DeviceContext* dContext;
     ID3D11RenderTargetView *backBuffer;
 
-    ID3D10Blob* pixelShader;
-    ID3D10Blob* vertexShader;
+    ID3D11PixelShader* pixelShader;
+    ID3D11VertexShader* vertexShader;
+
+    ID3D11Buffer* vertexBuffer;
+
+    Vertex vertexData[3];
+    ID3D11InputLayout* vertexLayout;
 
     union
     {
@@ -32,12 +51,7 @@ struct MainMemory
 
 };
 
-enum ShaderType
-{
-    pixelShader,
-    vertexShader
 
-};
 
 
 
@@ -165,12 +179,19 @@ void InitD3D(const HWND windowHandle, IDXGISwapChain** dSwapChain, ID3D11Device*
 
 
 }
-void QuitD3D(IDXGISwapChain* dSwapChain, ID3D11Device* dDevice, ID3D11DeviceContext* dContext)
+void QuitD3D(MainMemory* m)
 {
-    dSwapChain->SetFullscreenState(false, nullptr);
-    dSwapChain->Release();
-    dDevice->Release();
-    dContext->Release();
+    m->dSwapChain->SetFullscreenState(false, nullptr);
+
+    m->vertexLayout->Release();
+
+    m->vertexShader->Release();
+    m->pixelShader->Release();
+
+    m->dSwapChain->Release();
+    m->backBuffer->Release();
+    m->dDevice->Release();
+    m->dContext->Release();
 }
 
 void SetRenderTarget(IDXGISwapChain* dSwapChain, ID3D11Device* dDevice, ID3D11DeviceContext* dContext, ID3D11RenderTargetView** backBuffer)
@@ -194,32 +215,36 @@ void SetViewport(ID3D11DeviceContext* dContext, uint32_t clientWidth, uint32_t c
     dContext->RSSetViewports(1, &viewport);
 }
 
-void Render(IDXGISwapChain* dSwapChain, ID3D11Device* dDevice, ID3D11DeviceContext* dContext, ID3D11RenderTargetView* backBuffer)
+void Render(IDXGISwapChain* dSwapChain, ID3D11Device* dDevice, ID3D11DeviceContext* dContext, ID3D11RenderTargetView* backBuffer, void* vertexData, uint32_t vertexStride)
 {
     FLOAT color[] = { 0.0f, 0.2f, 0.4f, 1.0f };
     dContext->ClearRenderTargetView(backBuffer, color);
+    uint32_t offset = 0;
+    dContext->IASetVertexBuffers(0, 1,(ID3D11Buffer**) &vertexData, &vertexStride, &offset);
+    dContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dContext->Draw(3, 0);
 
 
     dSwapChain->Present(0, 0);
 }
 
-void LoadShader(ID3D11Device* dDevice, const char* name, ShaderType shaderType, void* shader)
+ID3DBlob* LoadShader(ID3D11Device* dDevice, const wchar_t* name, ShaderType shaderType, void* shader)
 {
-    ID3D10Blob* data = nullptr;
+    ID3DBlob* shaderData = nullptr;
     switch (shaderType)
     {
         case vertexShader:
         {
-            D3DCompileFromFile((LPCWSTR)name, 0, 0, "VShader", "vs_4_0", 0, 0, &data, 0);
-            Assert(data != nullptr, "could not load shader");
-            dDevice->CreateVertexShader(data->GetBufferPointer(), data->GetBufferSize(), nullptr, (ID3D11VertexShader**)&shader);
+            D3DCompileFromFile(name, 0, 0, "VShader", "vs_4_0", 0, 0, &shaderData, 0);
+            Assert(shaderData != nullptr, "could not load shader");
+            dDevice->CreateVertexShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, (ID3D11VertexShader**)shader);
         }
         break;
         case pixelShader:
         {
-            D3DCompileFromFile((LPCWSTR)name, 0, 0, "VShader", "ps_4_0", 0, 0, &data, 0);
-            Assert(data != nullptr, "could not load shader");
-            dDevice->CreatePixelShader(data->GetBufferPointer(), data->GetBufferSize(), nullptr, (ID3D11PixelShader**)&shader);
+            D3DCompileFromFile(name, 0, 0, "PShader", "ps_4_0", 0, 0, &shaderData, 0);
+            Assert(shaderData != nullptr, "could not load shader");
+            dDevice->CreatePixelShader(shaderData->GetBufferPointer(), shaderData->GetBufferSize(), nullptr, (ID3D11PixelShader**)shader);
         }
         break;
         default:
@@ -227,24 +252,75 @@ void LoadShader(ID3D11Device* dDevice, const char* name, ShaderType shaderType, 
             Assert(0, "loadshader does not have a proper shadertype passed to it.");
         }
     }
+    return shaderData;
 }
 
-int main()
+void MoveDataToGPU(ID3D11DeviceContext* dContext, ID3D11Device* dDevice, void* data, uint32_t dataSize, ID3D11Buffer* gpuBuffer)
 {
-    MainMemory* m = new MainMemory();
-    m->running = true;
+    D3D11_BUFFER_DESC bd = {};
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.ByteWidth = dataSize;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    dDevice->CreateBuffer(&bd, nullptr, &gpuBuffer);
+
+    D3D11_MAPPED_SUBRESOURCE ms;
+    dContext->Map(gpuBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
+    memcpy(ms.pData, data, dataSize);
+    dContext->Unmap(gpuBuffer, 0);
+}
+
+void InitPipeline(MainMemory* m)
+{
+
+    LoadShader(m->dDevice, L"D:\\scottsdocs\\sourcecode\\d3dtriangle\\build\\shaders\\shaders.shaders", ShaderType::pixelShader, &m->pixelShader);
+    ID3DBlob *vertexShaderData  = LoadShader(m->dDevice, L"D:\\scottsdocs\\sourcecode\\d3dtriangle\\build\\shaders\\shaders.shaders", ShaderType::vertexShader, &m->vertexShader);
+    m->dContext->PSSetShader(m->pixelShader, 0, 0);
+    m->dContext->VSSetShader(m->vertexShader, 0, 0);
+
+    D3D11_INPUT_ELEMENT_DESC ied[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, sizeof(float[3]), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    m->dDevice->CreateInputLayout(ied, 2, vertexShaderData->GetBufferPointer(), vertexShaderData->GetBufferSize(), &m->vertexLayout);
+    m->dContext->IASetInputLayout(m->vertexLayout);
+}
+
+void Init(MainMemory* m)
+{
+
     m->clientWidth = 1200;
     m->clientHeight = 800;
+    m->vertexData[0] = { 0.0f, 0.5f, 0.0f, 0.1f, 0.4f, 0.6f, 1.0f };
+    m->vertexData[1] = { 0.5f, -0.5f, 0.0f, 0.2f, 0.5f, 0.7f, 1.0f };
+    m->vertexData[2] = { -0.5f, -0.5f, 0.0f, 0.3f, 0.6f, 0.8f, 1.0f };
     m->windowHandle = NewWindow("d3dtriangle", m->clientWidth, m->clientHeight, m);
 
     InitD3D(m->windowHandle, &m->dSwapChain, &m->dDevice, &m->dContext, m->clientWidth, m->clientHeight);
     SetRenderTarget(m->dSwapChain, m->dDevice, m->dContext, &m->backBuffer);
     SetViewport(m->dContext, m->clientWidth, m->clientHeight);
+    MoveDataToGPU(m->dContext, m->dDevice, &m->vertexData, sizeof(m->vertexData), m->vertexBuffer);
+    InitPipeline(m);
 
-    LoadShader(m->dDevice, "D:\\scottsdocs\\sourcecode\\d3dtriangle\\build\\shaders\\shaders.shaders", ShaderType::pixelShader, m->pixelShader);
-    LoadShader(m->dDevice, "D:\\scottsdocs\\sourcecode\\d3dtriangle\\build\\shaders\\shaders.shaders", ShaderType::vertexShader, m->vertexShader);
+    m->initialized = true;
+}
 
+void Frame(MainMemory* m)
+{
+    Render(m->dSwapChain, m->dDevice, m->dContext, m->backBuffer, &m->vertexBuffer, sizeof(Vertex));
+}
 
+void Quit(MainMemory* m)
+{
+    QuitD3D(m);
+    DestroyWindow(m->windowHandle);
+}
+
+int main()
+{
+    MainMemory* m = new MainMemory();
+    Init(m);
 
     while (m->running)
     {
@@ -254,11 +330,9 @@ int main()
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+        Frame(m);
 
-        Render(m->dSwapChain, m->dDevice, m->dContext, m->backBuffer);
     }
-
-    QuitD3D(m->dSwapChain, m->dDevice, m->dContext);
-
+    Quit(m);
     return 0;
 }
